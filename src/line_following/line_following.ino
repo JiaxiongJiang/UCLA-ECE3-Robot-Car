@@ -1,9 +1,4 @@
-
 #include <ECE3.h>
-
-// ==========================================
-// 1. SENSOR CONFIGURATION
-// ==========================================
 
 uint16_t sensorValues[8];
 
@@ -19,10 +14,7 @@ int maxValues[8] = {
     2500, 2500, 2500, 2500,
     2500, 2500, 2500, 2500};
 
-// ==========================================
-// 2. MOTOR CONFIGURATION
-// ==========================================
-
+// Motor pins
 const int left_nslp_pin = 31;
 const int right_nslp_pin = 11;
 
@@ -34,10 +26,7 @@ const int right_pwm_pin = 39;
 
 const int LED_RF = 41;
 
-// ==========================================
-// 3. PD CONTROLLER
-// ==========================================
-
+// PD controller
 float KP = 0.2;
 float KD = 1.5;
 
@@ -50,10 +39,7 @@ int base_speed = 95;
 
 bool resetDerivative = false;
 
-// ==========================================
-// 4. TIME-BASED SPEED CONTROL
-// ==========================================
-
+// Speed control
 unsigned long startTime = 0;
 
 void updateSpeed()
@@ -78,33 +64,21 @@ void updateSpeed()
     }
 }
 
-// ==========================================
-// 5. FINISH LINE DETECTION
-// ==========================================
-
+// Finish line detection
 const uint32_t FINISH_THRESHOLD = 15500;
 
 const uint8_t CONFIRM_COUNT = 3;
 
 uint8_t finishCounter = 0;
 
-// 0 = First finish not detected
-// 1 = First finish detected, U-turn completed
-// 2 = Second finish detected, stop
 uint8_t finishCount = 0;
 
-// ==========================================
-// 6. U-TURN CONFIGURATION
-// ==========================================
-
+// U-turn settings
 const int UTURN_SPEED = 200;
 
 const unsigned long UTURN_TIME = 300;
 
-// ==========================================
-// 7. MOTOR CONTROL FUNCTION
-// ==========================================
-
+// Motor control
 void setMotor(int motor_speed, int dir_pin, int pwm_pin)
 {
     motor_speed = constrain(motor_speed, -255, 255);
@@ -127,20 +101,14 @@ void setMotor(int motor_speed, int dir_pin, int pwm_pin)
     analogWrite(pwm_pin, abs(motor_speed));
 }
 
-// ==========================================
-// 8. STOP MOTORS
-// ==========================================
-
+// Stop both motors
 void stopMotors()
 {
     setMotor(0, left_dir_pin, left_pwm_pin);
     setMotor(0, right_dir_pin, right_pwm_pin);
 }
 
-// ==========================================
-// 9. DETECT FINISH LINE
-// ==========================================
-
+// Check sensor readings
 bool detectFinishLine()
 {
     uint32_t sensorSum = 0;
@@ -153,10 +121,7 @@ bool detectFinishLine()
     return sensorSum > FINISH_THRESHOLD;
 }
 
-// ==========================================
-// 10. CONFIRM FINISH LINE
-// ==========================================
-
+// Confirm finish line detection
 bool confirmFinishLine()
 {
     if (detectFinishLine())
@@ -177,18 +142,12 @@ bool confirmFinishLine()
     return false;
 }
 
-// ==========================================
-// 11. 180 DEGREE U-TURN
-// ==========================================
-
+// Turn around
 void turn180()
 {
     stopMotors();
 
     delay(200);
-
-    // Left wheel forward
-    // Right wheel backward
 
     setMotor(UTURN_SPEED, left_dir_pin, left_pwm_pin);
     setMotor(-UTURN_SPEED, right_dir_pin, right_pwm_pin);
@@ -199,14 +158,9 @@ void turn180()
 
     delay(200);
 
-    // Reset PD controller history
     prevError = 0;
     resetDerivative = true;
 }
-
-// ==========================================
-// 12. SETUP
-// ==========================================
 
 void setup()
 {
@@ -227,56 +181,37 @@ void setup()
 
     delay(2000);
 
-    // Start timing after initialization
     startTime = millis();
 }
 
-// ==========================================
-// 13. MAIN LOOP
-// ==========================================
-
 void loop()
 {
-    // Read all 8 sensors
     ECE3_read_IR(sensorValues);
 
-    // ======================================
-    // FINISH LINE DETECTION
-    // ======================================
-
+    // Check finish line
     if (confirmFinishLine())
     {
         finishCount++;
 
-        // FIRST FINISH LINE: U-TURN
         if (finishCount == 1)
         {
             turn180();
             return;
         }
-
-        // SECOND FINISH LINE: STOP
         else if (finishCount >= 2)
         {
             stopMotors();
 
             while (true)
             {
-                // Permanently stop
             }
         }
     }
 
-    // ======================================
-    // TIME-BASED SPEED CONTROL
-    // ======================================
-
+    // Update motor speed
     updateSpeed();
 
-    // ======================================
-    // NORMAL LINE FOLLOWING
-    // ======================================
-
+    // Calculate error
     error = 0;
 
     for (int i = 0; i < sensor_count; i++)
@@ -293,10 +228,7 @@ void loop()
         error += holdError;
     }
 
-    // ======================================
-    // PD CONTROLLER
-    // ======================================
-
+    // PD control
     if (resetDerivative)
     {
         derivative = 0;
@@ -309,20 +241,14 @@ void loop()
 
     correction = KP * error + KD * derivative;
 
-    // ======================================
-    // MOTOR SPEED
-    // ======================================
-
+    // Calculate motor speeds
     int right_speed = base_speed - (int)correction;
     int left_speed = base_speed + (int)correction;
 
     right_speed = constrain(right_speed, -255, 255);
     left_speed = constrain(left_speed, -255, 255);
 
-    // ======================================
-    // APPLY MOTOR CONTROL
-    // ======================================
-
+    // Apply motor speeds
     setMotor(right_speed, right_dir_pin, right_pwm_pin);
     setMotor(left_speed, left_dir_pin, left_pwm_pin);
 
