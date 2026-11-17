@@ -51,28 +51,58 @@ int base_speed = 95;
 bool resetDerivative = false;
 
 // ==========================================
-// 4. FINISH LINE DETECTION
+// 4. TIME-BASED SPEED CONTROL
 // ==========================================
 
-const uint32_t FINISH_THRESHOLD = 14000;
+unsigned long startTime = 0;
+
+void updateSpeed()
+{
+    unsigned long elapsedTime = millis() - startTime;
+
+    if (elapsedTime < 4500)
+    {
+        base_speed = 90;
+    }
+    else if (elapsedTime < 5500)
+    {
+        base_speed = 200;
+    }
+    else if (elapsedTime < 18000)
+    {
+        base_speed = 95;
+    }
+    else
+    {
+        base_speed = 95;
+    }
+}
+
+// ==========================================
+// 5. FINISH LINE DETECTION
+// ==========================================
+
+const uint32_t FINISH_THRESHOLD = 15500;
 
 const uint8_t CONFIRM_COUNT = 3;
 
 uint8_t finishCounter = 0;
 
-bool hasTurned = false;
+// 0 = First finish not detected
+// 1 = First finish detected, U-turn completed
+// 2 = Second finish detected, stop
+uint8_t finishCount = 0;
 
 // ==========================================
-// 5. U-TURN CONFIGURATION
+// 6. U-TURN CONFIGURATION
 // ==========================================
 
-const int UTURN_SPEED = 80;
+const int UTURN_SPEED = 200;
 
-// Initial estimate - requires calibration
-const unsigned long UTURN_TIME = 500;
+const unsigned long UTURN_TIME = 300;
 
 // ==========================================
-// 6. MOTOR CONTROL FUNCTION
+// 7. MOTOR CONTROL FUNCTION
 // ==========================================
 
 void setMotor(int motor_speed, int dir_pin, int pwm_pin)
@@ -98,7 +128,7 @@ void setMotor(int motor_speed, int dir_pin, int pwm_pin)
 }
 
 // ==========================================
-// 7. STOP MOTORS
+// 8. STOP MOTORS
 // ==========================================
 
 void stopMotors()
@@ -108,7 +138,7 @@ void stopMotors()
 }
 
 // ==========================================
-// 8. DETECT FINISH LINE
+// 9. DETECT FINISH LINE
 // ==========================================
 
 bool detectFinishLine()
@@ -124,7 +154,7 @@ bool detectFinishLine()
 }
 
 // ==========================================
-// 9. CONFIRM FINISH LINE
+// 10. CONFIRM FINISH LINE
 // ==========================================
 
 bool confirmFinishLine()
@@ -148,23 +178,23 @@ bool confirmFinishLine()
 }
 
 // ==========================================
-// 10. 180 DEGREE U-TURN
+// 11. 180 DEGREE U-TURN
 // ==========================================
 
 void turn180()
 {
-    // Stop before turning
     stopMotors();
 
     delay(200);
 
-    // Rotate in place
+    // Left wheel forward
+    // Right wheel backward
+
     setMotor(UTURN_SPEED, left_dir_pin, left_pwm_pin);
     setMotor(-UTURN_SPEED, right_dir_pin, right_pwm_pin);
 
     delay(UTURN_TIME);
 
-    // Stop after turning
     stopMotors();
 
     delay(200);
@@ -172,12 +202,10 @@ void turn180()
     // Reset PD controller history
     prevError = 0;
     resetDerivative = true;
-
-    Serial.println("U-Turn completed!");
 }
 
 // ==========================================
-// 11. SETUP
+// 12. SETUP
 // ==========================================
 
 void setup()
@@ -197,13 +225,14 @@ void setup()
 
     ECE3_Init();
 
-    Serial.begin(9600);
-
     delay(2000);
+
+    // Start timing after initialization
+    startTime = millis();
 }
 
 // ==========================================
-// 12. MAIN LOOP
+// 13. MAIN LOOP
 // ==========================================
 
 void loop()
@@ -211,18 +240,38 @@ void loop()
     // Read all 8 sensors
     ECE3_read_IR(sensorValues);
 
-    // Check finish line
-    if (!hasTurned && confirmFinishLine())
+    // ======================================
+    // FINISH LINE DETECTION
+    // ======================================
+
+    if (confirmFinishLine())
     {
+        finishCount++;
 
-        Serial.println("FINISH LINE DETECTED!");
+        // FIRST FINISH LINE: U-TURN
+        if (finishCount == 1)
+        {
+            turn180();
+            return;
+        }
 
-        hasTurned = true;
+        // SECOND FINISH LINE: STOP
+        else if (finishCount >= 2)
+        {
+            stopMotors();
 
-        turn180();
-
-        return;
+            while (true)
+            {
+                // Permanently stop
+            }
+        }
     }
+
+    // ======================================
+    // TIME-BASED SPEED CONTROL
+    // ======================================
+
+    updateSpeed();
 
     // ======================================
     // NORMAL LINE FOLLOWING
