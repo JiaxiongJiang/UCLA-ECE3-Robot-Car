@@ -65,7 +65,7 @@ void updateSpeed()
 }
 
 // Finish line detection
-const uint32_t FINISH_THRESHOLD = 15500;
+const uint32_t FINISH_THRESHOLD = 17000;
 
 const uint8_t CONFIRM_COUNT = 3;
 
