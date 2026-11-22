@@ -64,7 +64,7 @@ void updateSpeed()
 }
 
 // Finish line detection
-const uint32_t FINISH_THRESHOLD = 17000;
+const uint32_t FINISH_THRESHOLD = 18000;
 
 const uint8_t CONFIRM_COUNT = 3;
 
@@ -146,7 +146,7 @@ void turn180()
 {
     stopMotors();
 
-    delay(200);
+    delay(10);
 
     setMotor(UTURN_SPEED, left_dir_pin, left_pwm_pin);
     setMotor(-UTURN_SPEED, right_dir_pin, right_pwm_pin);
@@ -155,7 +155,7 @@ void turn180()
 
     stopMotors();
 
-    delay(200);
+    delay(10);
 
     prevError = 0;
     resetDerivative = true;
@@ -208,7 +208,7 @@ void loop()
     }
 
     // Update motor speed
-    updateSpeed();
+    // updateSpeed();
 
     // Calculate error
     error = 0;
