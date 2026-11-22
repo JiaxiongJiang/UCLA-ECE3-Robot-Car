@@ -5,7 +5,7 @@ uint16_t sensorValues[8];
 const uint8_t sensor_count = 8;
 
 const int weights[8] = {
-    8, 4, 2, 1, -1, -2, -4, -8};
+    10, 9, 4, 1, -1, -4, -9, -10};
 
 int minValues[8] = {
     794, 567, 612, 521, 589, 589, 657, 612};
@@ -26,7 +26,7 @@ const int right_pwm_pin = 39;
 const int LED_RF = 41;
 
 // PD controller
-float KP = 0.2;
+float KP = 0.23;
 float KD = 1.5;
 
 float error = 0;
@@ -34,7 +34,7 @@ float prevError = 0;
 float derivative = 0;
 float correction = 0;
 
-int base_speed = 95;
+int base_speed = 110;
 
 bool resetDerivative = false;
 
