@@ -5,7 +5,7 @@ uint16_t sensorValues[8];
 const uint8_t sensor_count = 8;
 
 const int weights[8] = {
-    10, 9, 4, 1, -1, -4, -9, -10};
+    25, 24, 8, 2, -2, -8, -24, -25};
 
 int minValues[8] = {
     794, 567, 612, 521, 589, 589, 657, 612};
@@ -26,8 +26,8 @@ const int right_pwm_pin = 39;
 const int LED_RF = 41;
 
 // PD controller
-float KP = 0.23;
-float KD = 1.5;
+float KP = 0.26;
+float KD = 1.4;
 
 float error = 0;
 float prevError = 0;
@@ -222,7 +222,7 @@ void loop()
 
         normNumber = constrain(normNumber, 0, 1000);
 
-        int holdError = (normNumber * weights[i]) / 4;
+        int holdError = (normNumber * weights[i]) / 8;
 
         error += holdError;
     }
