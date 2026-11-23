@@ -26,8 +26,8 @@ const int right_pwm_pin = 39;
 const int LED_RF = 41;
 
 // PD controller
-float KP = 0.26;
-float KD = 1.4;
+float KP = 0.25;
+float KD = 1;
 
 float error = 0;
 float prevError = 0;
@@ -64,7 +64,7 @@ void updateSpeed()
 }
 
 // Finish line detection
-const uint32_t FINISH_THRESHOLD = 18000;
+const uint32_t FINISH_THRESHOLD = 12000;
 
 const uint8_t CONFIRM_COUNT = 3;
 
