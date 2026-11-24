@@ -1,255 +1,729 @@
 #include <ECE3.h>
 
-uint16_t sensorValues[8];
+// =====================================================
+// ECE3 Robot Car - Single-file sketch
+// All core logic and main program are combined here.
+// No separate .h file is needed.
+// =====================================================
 
-const uint8_t sensor_count = 8;
+// ---------- IR sensors: S0 = rightmost, S7 = leftmost ----------
+const uint8_t SENSOR_COUNT = 8;
+uint16_t sensorValues[SENSOR_COUNT];
 
-const int weights[8] = {
-    25, 24, 8, 2, -2, -8, -24, -25};
+const int weights[SENSOR_COUNT] = {15, 14, 12, 8, -8, -12, -14, -15};
+int minValues[SENSOR_COUNT] = {794, 567, 612, 521, 589, 589, 657, 612};
+int maxValues[SENSOR_COUNT] = {2500, 2282, 2213, 1677, 1910, 1840, 2330, 2500};
 
-int minValues[8] = {
-    794, 567, 612, 521, 589, 589, 657, 612};
-
-int maxValues[8] = {
-    2500, 2282, 2213, 1677, 1910, 1840, 2330, 2500};
-
-// Motor pins
+// ---------- Motor pins ----------
 const int left_nslp_pin = 31;
 const int right_nslp_pin = 11;
-
 const int left_dir_pin = 29;
 const int right_dir_pin = 30;
-
 const int left_pwm_pin = 40;
 const int right_pwm_pin = 39;
-
 const int LED_RF = 41;
 
-// PD controller
-float KP = 0.25;
-float KD = 1;
+// ---------- PD parameters ----------
+float KP = 0.06;
+float KD = 0.3;
+const int NORMAL_BASE_SPEED = 120;
+int base_speed = NORMAL_BASE_SPEED;
 
 float error = 0;
 float prevError = 0;
 float derivative = 0;
 float correction = 0;
 
-int base_speed = 110;
+// ---------- Pivot parameters ----------
+const int OUTER_SENSOR_THRESHOLD = 1500;
+const int PIVOT_TRIGGER_ERROR_THRESHOLD = 2000;
+const int PIVOT_ERROR_EXIT_THRESHOLD = 2000;
+const int CENTER_SENSOR_THRESHOLD = 1500;
+const int PIVOT_SPEED = 110;
+const unsigned long PIVOT_CHECK_INTERVAL = 20;
 
-bool resetDerivative = false;
+bool pivotActive = false;
+int pivotDirection = 0;
+unsigned long lastPivotCheckTime = 0;
 
-// Speed control
-unsigned long startTime = 0;
+// ---------- Finish-line / black-line parameters ----------
+const uint16_t FINISH_BLACK_LINE_THRESHOLD = 15000;
+const uint8_t FINISH_CONFIRM_COUNT = 3;
+const unsigned long FINISH_PRE_TURN_PAUSE_MS = 200;
+const int FINISH_UTURN_SPEED = 220;
+const unsigned long FINISH_UTURN_TIME_MS = 300;
+const unsigned long FINISH_POST_TURN_PAUSE_MS = 200;
 
-void updateSpeed()
+uint8_t finishLineCount = 0;
+uint8_t finishLineConsecutiveCount = 0;
+bool finishLineDetected = false;
+bool finishLineStopped = false;
+bool finishFeedbackActive = false;
+
+int currentLeftSpeed = 0;
+int currentRightSpeed = 0;
+
+// ---------- Timing and logger parameters ----------
+const unsigned long START_DELAY_TIME = 2000;
+const unsigned long RUN_TIME = 50000;
+const unsigned long SAMPLE_INTERVAL = 10;
+const int MAX_SAMPLES = 300;
+
+const unsigned long DEBOUNCE_TIME = 30;
+int lastButtonReading = HIGH;
+int stableButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+
+unsigned long delayStartTime = 0;
+unsigned long runStartTime = 0;
+unsigned long lastSampleTime = 0;
+
+struct DataPoint
 {
-    unsigned long elapsedTime = millis() - startTime;
+    unsigned long time_ms;
+    uint16_t sensor[8];
+    float error;
+    float derivative;
+    float correction;
+    int base_speed;
+    int left_speed;
+    int right_speed;
+    int pivot_active;
+    int pivot_direction;
+    int center_detected;
+    unsigned long sensor_sum;
+    int finish_line_detected;
+    int finish_line_count;
+    int finish_line_stopped;
+};
 
-    if (elapsedTime < 4500)
-    {
-        base_speed = 90;
-    }
-    else if (elapsedTime < 5500)
-    {
-        base_speed = 200;
-    }
-    else if (elapsedTime < 18000)
-    {
-        base_speed = 95;
-    }
-    else
-    {
-        base_speed = 95;
-    }
-}
+DataPoint dataLog[MAX_SAMPLES];
+int sampleCount = 0;
 
-// Finish line detection
-const uint32_t FINISH_THRESHOLD = 12000;
-
-const uint8_t CONFIRM_COUNT = 3;
-
-uint8_t finishCounter = 0;
-
-uint8_t finishCount = 0;
-
-// U-turn settings
-const int UTURN_SPEED = 200;
-
-const unsigned long UTURN_TIME = 300;
-
-// Motor control
+// ---------- Core motor methods ----------
 void setMotor(int motor_speed, int dir_pin, int pwm_pin)
 {
     motor_speed = constrain(motor_speed, -255, 255);
-
     if (motor_speed == 0)
     {
         analogWrite(pwm_pin, 0);
         return;
     }
-
-    if (motor_speed > 0)
-    {
-        digitalWrite(dir_pin, LOW);
-    }
-    else
-    {
-        digitalWrite(dir_pin, HIGH);
-    }
-
+    digitalWrite(dir_pin, motor_speed > 0 ? LOW : HIGH);
     analogWrite(pwm_pin, abs(motor_speed));
 }
 
-// Stop both motors
 void stopMotors()
 {
     setMotor(0, left_dir_pin, left_pwm_pin);
     setMotor(0, right_dir_pin, right_pwm_pin);
+    currentLeftSpeed = 0;
+    currentRightSpeed = 0;
 }
 
-// Check sensor readings
-bool detectFinishLine()
+void driveMotors(int leftCommand, int rightCommand)
 {
-    uint32_t sensorSum = 0;
-
-    for (uint8_t i = 0; i < sensor_count; i++)
-    {
-        sensorSum += sensorValues[i];
-    }
-
-    return sensorSum > FINISH_THRESHOLD;
+    leftCommand = constrain(leftCommand, -255, 255);
+    rightCommand = constrain(rightCommand, -255, 255);
+    setMotor(leftCommand, left_dir_pin, left_pwm_pin);
+    setMotor(rightCommand, right_dir_pin, right_pwm_pin);
+    currentLeftSpeed = leftCommand;
+    currentRightSpeed = rightCommand;
 }
 
-// Confirm finish line detection
-bool confirmFinishLine()
+// ---------- Button methods ----------
+int readS1()
 {
-    if (detectFinishLine())
-    {
-        finishCounter++;
-    }
-    else
-    {
-        finishCounter = 0;
-    }
-
-    if (finishCounter >= CONFIRM_COUNT)
-    {
-        finishCounter = 0;
-        return true;
-    }
-
-    return false;
+    return (P1->IN & BIT1) ? HIGH : LOW;
 }
 
-// Turn around
-void turn180()
+bool buttonPressed()
 {
-    stopMotors();
+    int reading = readS1();
+    if (reading != lastButtonReading)
+        lastDebounceTime = millis();
 
-    delay(10);
-
-    setMotor(UTURN_SPEED, left_dir_pin, left_pwm_pin);
-    setMotor(-UTURN_SPEED, right_dir_pin, right_pwm_pin);
-
-    delay(UTURN_TIME);
-
-    stopMotors();
-
-    delay(10);
-
-    prevError = 0;
-    resetDerivative = true;
-}
-
-void setup()
-{
-    pinMode(left_nslp_pin, OUTPUT);
-    pinMode(left_dir_pin, OUTPUT);
-    pinMode(left_pwm_pin, OUTPUT);
-
-    pinMode(right_nslp_pin, OUTPUT);
-    pinMode(right_dir_pin, OUTPUT);
-    pinMode(right_pwm_pin, OUTPUT);
-
-    digitalWrite(left_nslp_pin, HIGH);
-    digitalWrite(right_nslp_pin, HIGH);
-
-    pinMode(LED_RF, OUTPUT);
-
-    ECE3_Init();
-
-    delay(2000);
-
-    startTime = millis();
-}
-
-void loop()
-{
-    ECE3_read_IR(sensorValues);
-
-    // Check finish line
-    if (confirmFinishLine())
+    if (millis() - lastDebounceTime >= DEBOUNCE_TIME)
     {
-        finishCount++;
-
-        if (finishCount == 1)
+        if (reading != stableButtonState)
         {
-            turn180();
-            return;
-        }
-        else if (finishCount >= 2)
-        {
-            stopMotors();
-
-            while (true)
+            stableButtonState = reading;
+            if (stableButtonState == LOW)
             {
+                lastButtonReading = reading;
+                return true;
             }
         }
     }
+    lastButtonReading = reading;
+    return false;
+}
 
-    // Update motor speed
-    // updateSpeed();
-
-    // Calculate error
-    error = 0;
-
-    for (int i = 0; i < sensor_count; i++)
+// ---------- Sensor / PD methods ----------
+float calculateError()
+{
+    float newError = 0;
+    for (int i = 0; i < SENSOR_COUNT; i++)
     {
-        long raw = sensorValues[i];
+        long normalized = (long)(sensorValues[i] - minValues[i]) * 1000L / (maxValues[i] - minValues[i]);
+        normalized = constrain(normalized, 0, 1000);
+        newError += (normalized * weights[i]) / 8;
+    }
+    return newError;
+}
 
-        long normNumber =
-            (raw - minValues[i]) * 1000L / (maxValues[i] - minValues[i]);
+void calculatePD()
+{
+    error = calculateError();
+    derivative = error - prevError;
+    correction = KP * error + KD * derivative;
+}
 
-        normNumber = constrain(normNumber, 0, 1000);
+void controlMotors()
+{
+    int rightCommand = constrain(base_speed - (int)correction, -255, 255);
+    int leftCommand = constrain(base_speed + (int)correction, -255, 255);
+    driveMotors(leftCommand, rightCommand);
+    prevError = error;
+}
 
-        int holdError = (normNumber * weights[i]) / 8;
+// ---------- Pivot methods ----------
+void applyPivot()
+{
+    if (pivotDirection > 0)
+        driveMotors(PIVOT_SPEED, -PIVOT_SPEED);
+    else
+        driveMotors(-PIVOT_SPEED, PIVOT_SPEED);
+}
 
-        error += holdError;
+void startPivot(int direction)
+{
+    pivotActive = true;
+    pivotDirection = direction;
+    lastPivotCheckTime = millis();
+    derivative = 0;
+    correction = 0;
+    applyPivot();
+}
+
+bool updatePivot()
+{
+    unsigned long now = millis();
+    if (now - lastPivotCheckTime < PIVOT_CHECK_INTERVAL)
+    {
+        applyPivot();
+        return false;
     }
 
-    // PD control
-    if (resetDerivative)
+    lastPivotCheckTime = now;
+    error = calculateError();
+
+    bool errorSmall = abs((int)error) < PIVOT_ERROR_EXIT_THRESHOLD;
+    bool centerDetected =
+        (sensorValues[3] > CENTER_SENSOR_THRESHOLD) ||
+        (sensorValues[4] > CENTER_SENSOR_THRESHOLD);
+
+    if (errorSmall && centerDetected)
     {
+        pivotActive = false;
+        pivotDirection = 0;
+        prevError = error;
         derivative = 0;
-        resetDerivative = false;
+        correction = 0;
+        return true;
+    }
+
+    applyPivot();
+    return false;
+}
+
+// ---------- Finish-line methods ----------
+unsigned long getSensorSum()
+{
+    unsigned long total = 0;
+    for (int i = 0; i < SENSOR_COUNT; i++)
+        total += sensorValues[i];
+    return total;
+}
+
+bool updateFinishLineDetection()
+{
+    if (finishLineStopped)
+        return false;
+
+    unsigned long total = getSensorSum();
+    if (total >= FINISH_BLACK_LINE_THRESHOLD)
+    {
+        if (finishLineConsecutiveCount < FINISH_CONFIRM_COUNT)
+        {
+            finishLineConsecutiveCount++;
+        }
     }
     else
     {
-        derivative = error - prevError;
+        finishLineConsecutiveCount = 0;
+        finishFeedbackActive = false;
     }
 
-    correction = KP * error + KD * derivative;
+    if (finishLineConsecutiveCount >= FINISH_CONFIRM_COUNT &&
+        !finishFeedbackActive)
+    {
+        finishFeedbackActive = true;
+        finishLineDetected = true;
+        finishLineCount++;
+        digitalWrite(LED_RF, HIGH);
+        return true;
+    }
+    return false;
+}
 
-    // Calculate motor speeds
-    int right_speed = base_speed - (int)correction;
-    int left_speed = base_speed + (int)correction;
+// ---------- Logger method ----------
+void recordData()
+{
+    if (sampleCount >= MAX_SAMPLES)
+        return;
+    DataPoint &d = dataLog[sampleCount];
+    d.time_ms = millis() - runStartTime;
+    for (int i = 0; i < SENSOR_COUNT; i++)
+        d.sensor[i] = sensorValues[i];
 
-    right_speed = constrain(right_speed, -255, 255);
-    left_speed = constrain(left_speed, -255, 255);
+    d.error = error;
+    d.derivative = derivative;
+    d.correction = correction;
+    d.base_speed = base_speed;
+    d.left_speed = currentLeftSpeed;
+    d.right_speed = currentRightSpeed;
+    d.pivot_active = pivotActive ? 1 : 0;
+    d.pivot_direction = pivotDirection;
+    d.center_detected =
+        (sensorValues[3] > CENTER_SENSOR_THRESHOLD ||
+         sensorValues[4] > CENTER_SENSOR_THRESHOLD)
+            ? 1
+            : 0;
+    d.sensor_sum = getSensorSum();
+    d.finish_line_detected = finishLineDetected ? 1 : 0;
+    d.finish_line_count = finishLineCount;
+    d.finish_line_stopped = finishLineStopped ? 1 : 0;
+    sampleCount++;
+}
 
-    // Apply motor speeds
-    setMotor(right_speed, right_dir_pin, right_pwm_pin);
-    setMotor(left_speed, left_dir_pin, left_pwm_pin);
+// =====================================================
+// MAIN PROGRAM
+// =====================================================
 
-    prevError = error;
+enum LoggerState
+{
+    READY,
+    START_DELAY,
+    RECORDING,
+    DATA_READY,
+    PRINTING
+};
+
+LoggerState state = READY;
+
+enum FinishActionState
+{
+    FINISH_NORMAL,
+    FINISH_PRE_PAUSE,
+    FINISH_UTURN,
+    FINISH_POST_PAUSE,
+    FINISH_STOPPED
+};
+
+FinishActionState finishActionState = FINISH_NORMAL;
+unsigned long finishActionStartTime = 0;
+
+// -----------------------------------------------------
+// Reset all run-specific values before a new run
+// -----------------------------------------------------
+void resetRun()
+{
+    sampleCount = 0;
+
+    error = 0;
+    prevError = 0;
+    derivative = 0;
+    correction = 0;
+
+    base_speed = NORMAL_BASE_SPEED;
+
+    pivotActive = false;
+    pivotDirection = 0;
+    lastPivotCheckTime = 0;
+
+    finishLineCount = 0;
+    finishLineConsecutiveCount = 0;
+    finishLineDetected = false;
+    finishLineStopped = false;
+    finishFeedbackActive = false;
+
+    finishActionState = FINISH_NORMAL;
+    finishActionStartTime = 0;
+
+    stopMotors();
+    digitalWrite(LED_RF, LOW);
+}
+
+// -----------------------------------------------------
+// Start sequence: press S1 -> wait 2 seconds -> run
+// -----------------------------------------------------
+void startDelay()
+{
+    resetRun();
+    delayStartTime = millis();
+    state = START_DELAY;
+    digitalWrite(LED_RF, HIGH);
+}
+
+void beginRecording()
+{
+    runStartTime = millis();
+    lastSampleTime = runStartTime;
+    state = RECORDING;
+    digitalWrite(LED_RF, LOW);
+}
+
+// -----------------------------------------------------
+// Finish-line action
+//
+// First confirmed finish-line detection:
+//   1. Stop for 200 ms
+//   2. Pivot in place for 300 ms (approximate U-turn)
+//   3. Stop for 200 ms
+//   4. Reset PD history and resume line following
+//
+// Second confirmed finish-line detection:
+//   Stop permanently.
+// -----------------------------------------------------
+void beginFinishLineAction()
+{
+    stopMotors();
+
+    pivotActive = false;
+    pivotDirection = 0;
+
+    finishActionStartTime = millis();
+
+    if (finishLineCount >= 2)
+    {
+        finishLineStopped = true;
+        finishActionState = FINISH_STOPPED;
+        digitalWrite(LED_RF, HIGH);
+        Serial.println("FINISH LINE #2: ROBOT STOPPED");
+    }
+    else
+    {
+        finishActionState = FINISH_PRE_PAUSE;
+        Serial.println("FINISH LINE #1: PAUSE THEN U-TURN");
+    }
+}
+
+void updateFinishLineAction()
+{
+    unsigned long elapsed = millis() - finishActionStartTime;
+
+    switch (finishActionState)
+    {
+    case FINISH_PRE_PAUSE:
+        stopMotors();
+
+        if (elapsed >= FINISH_PRE_TURN_PAUSE_MS)
+        {
+            finishActionStartTime = millis();
+            finishActionState = FINISH_UTURN;
+        }
+        break;
+
+    case FINISH_UTURN:
+        // Opposite wheel directions. Without encoders, this is a
+        // time-based approximation, not a guaranteed 180-degree turn.
+        driveMotors(FINISH_UTURN_SPEED, -FINISH_UTURN_SPEED);
+
+        if (elapsed >= FINISH_UTURN_TIME_MS)
+        {
+            stopMotors();
+            finishActionStartTime = millis();
+            finishActionState = FINISH_POST_PAUSE;
+        }
+        break;
+
+    case FINISH_POST_PAUSE:
+        stopMotors();
+
+        if (elapsed >= FINISH_POST_TURN_PAUSE_MS)
+        {
+            // Prevent a derivative spike when PD control resumes.
+            error = calculateError();
+            prevError = error;
+            derivative = 0;
+            correction = 0;
+
+            pivotActive = false;
+            pivotDirection = 0;
+
+            finishLineConsecutiveCount = 0;
+            finishFeedbackActive = false;
+            finishLineDetected = false;
+
+            finishActionState = FINISH_NORMAL;
+            digitalWrite(LED_RF, LOW);
+            Serial.println("U-TURN COMPLETE: RESUME PD");
+        }
+        break;
+
+    case FINISH_STOPPED:
+        stopMotors();
+        digitalWrite(LED_RF, HIGH);
+        break;
+
+    case FINISH_NORMAL:
+    default:
+        break;
+    }
+}
+
+// -----------------------------------------------------
+// CSV output
+// -----------------------------------------------------
+void printData()
+{
+    Serial.println(
+        "time_ms,S0,S1,S2,S3,S4,S5,S6,S7,"
+        "error,derivative,correction,base_speed,left_speed,right_speed,"
+        "pivot_active,pivot_direction,center_detected,sensor_sum,"
+        "finish_line_detected,finish_line_count,finish_line_stopped");
+
+    for (int i = 0; i < sampleCount; i++)
+    {
+        DataPoint &d = dataLog[i];
+
+        Serial.print(d.time_ms);
+
+        for (int j = 0; j < SENSOR_COUNT; j++)
+        {
+            Serial.print(",");
+            Serial.print(d.sensor[j]);
+        }
+
+        Serial.print(",");
+        Serial.print(d.error, 2);
+        Serial.print(",");
+        Serial.print(d.derivative, 2);
+        Serial.print(",");
+        Serial.print(d.correction, 2);
+        Serial.print(",");
+        Serial.print(d.base_speed);
+        Serial.print(",");
+        Serial.print(d.left_speed);
+        Serial.print(",");
+        Serial.print(d.right_speed);
+        Serial.print(",");
+        Serial.print(d.pivot_active);
+        Serial.print(",");
+        Serial.print(d.pivot_direction);
+        Serial.print(",");
+        Serial.print(d.center_detected);
+        Serial.print(",");
+        Serial.print(d.sensor_sum);
+        Serial.print(",");
+        Serial.print(d.finish_line_detected);
+        Serial.print(",");
+        Serial.print(d.finish_line_count);
+        Serial.print(",");
+        Serial.println(d.finish_line_stopped);
+    }
+
+    Serial.println("END_OF_DATA");
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+void setup()
+{
+    // Motor driver pins
+    pinMode(left_nslp_pin, OUTPUT);
+    pinMode(right_nslp_pin, OUTPUT);
+    pinMode(left_dir_pin, OUTPUT);
+    pinMode(right_dir_pin, OUTPUT);
+    pinMode(left_pwm_pin, OUTPUT);
+    pinMode(right_pwm_pin, OUTPUT);
+    pinMode(LED_RF, OUTPUT);
+
+    // S1 button = MSP432 P1.1, active LOW, internal pull-up
+    P1->DIR &= ~BIT1;
+    P1->REN |= BIT1;
+    P1->OUT |= BIT1;
+
+    // Wake up both motor drivers
+    digitalWrite(left_nslp_pin, HIGH);
+    digitalWrite(right_nslp_pin, HIGH);
+
+    stopMotors();
+
+    ECE3_Init();
+    Serial.begin(115200);
+
+    digitalWrite(LED_RF, LOW);
+
+    lastButtonReading = readS1();
+    stableButtonState = lastButtonReading;
+}
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+void loop()
+{
+    bool pressed = buttonPressed();
+
+    if (state == READY)
+    {
+        stopMotors();
+
+        // Press S1 to begin a new run.
+        if (pressed)
+        {
+            startDelay();
+        }
+    }
+
+    else if (state == START_DELAY)
+    {
+        stopMotors();
+
+        if (millis() - delayStartTime >= START_DELAY_TIME)
+        {
+            beginRecording();
+        }
+    }
+
+    else if (state == RECORDING)
+    {
+        // Refresh all eight IR sensor readings every loop.
+        ECE3_read_IR(sensorValues);
+
+        // Once the second finish line has been confirmed, remain stopped.
+        if (finishActionState == FINISH_STOPPED || finishLineStopped)
+        {
+            stopMotors();
+            digitalWrite(LED_RF, HIGH);
+        }
+
+        // Finish-line pause / U-turn / pause action takes priority over PD/Pivot.
+        else if (finishActionState != FINISH_NORMAL)
+        {
+            updateFinishLineAction();
+        }
+
+        else
+        {
+            // Check the finish line before issuing normal motor commands.
+            if (updateFinishLineDetection())
+            {
+                beginFinishLineAction();
+            }
+
+            // If no finish-line event occurred, continue with Pivot or PD.
+            else if (pivotActive)
+            {
+                bool pivotExited = updatePivot();
+
+                // Resume PD immediately on the same loop that Pivot exits.
+                if (pivotExited)
+                {
+                    calculatePD();
+                    controlMotors();
+                }
+                else
+                {
+                    derivative = 0;
+                    correction = 0;
+                }
+            }
+
+            else
+            {
+                error = calculateError();
+
+                bool errorLarge =
+                    abs((int)error) > PIVOT_TRIGGER_ERROR_THRESHOLD;
+
+                // Right outer pair: S0 AND S1.
+                bool rightOuterPair =
+                    (sensorValues[0] > OUTER_SENSOR_THRESHOLD) &&
+                    (sensorValues[1] > OUTER_SENSOR_THRESHOLD) &&
+                    errorLarge;
+
+                // Left outer pair: S6 AND S7.
+                bool leftOuterPair =
+                    (sensorValues[6] > OUTER_SENSOR_THRESHOLD) &&
+                    (sensorValues[7] > OUTER_SENSOR_THRESHOLD) &&
+                    errorLarge;
+
+                if (rightOuterPair || leftOuterPair)
+                {
+                    int direction;
+
+                    if (rightOuterPair && leftOuterPair)
+                    {
+                        direction = (error >= 0) ? 1 : -1;
+                    }
+                    else
+                    {
+                        direction = rightOuterPair ? 1 : -1;
+                    }
+
+                    startPivot(direction);
+                }
+
+                else
+                {
+                    calculatePD();
+                    controlMotors();
+                }
+            }
+        }
+
+        // Record telemetry at the configured interval.
+        if (millis() - lastSampleTime >= SAMPLE_INTERVAL)
+        {
+            recordData();
+            lastSampleTime = millis();
+        }
+
+        // End the timed test. A finish-line permanent stop remains latched.
+        if (millis() - runStartTime >= RUN_TIME && !finishLineStopped)
+        {
+            stopMotors();
+            pivotActive = false;
+            pivotDirection = 0;
+            digitalWrite(LED_RF, LOW);
+            state = DATA_READY;
+        }
+    }
+
+    else if (state == DATA_READY)
+    {
+        stopMotors();
+
+        // Press S1 again to print the captured CSV.
+        if (pressed)
+        {
+            state = PRINTING;
+        }
+    }
+
+    else if (state == PRINTING)
+    {
+        stopMotors();
+
+        if (Serial)
+        {
+            printData();
+        }
+
+        state = READY;
+    }
 }
