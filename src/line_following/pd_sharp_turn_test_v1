@@ -3,133 +3,128 @@
 // =====================================================
 // 1. IR SENSOR CONFIGURATION
 // =====================================================
-
 uint16_t sensorValues[8];
-
 const uint8_t sensor_count = 8;
 
-const int weights[8] = {
-    25, 24, 8, 2, -2, -8, -24, -25};
+const int weights[8] = {15, 14, 12, 8, -8, -12, -14, -15};
 
-int minValues[8] = {
-    794, 567, 612, 521, 589, 589, 657, 612};
+int minValues[8] = {794, 567, 612, 521, 589, 589, 657, 612};
+int maxValues[8] = {2500, 2282, 2213, 1677, 1910, 1840, 2330, 2500};
 
-int maxValues[8] = {
-    2500, 2282, 2213, 1677, 1910, 1840, 2330, 2500};
 // =====================================================
 // 2. MOTOR PINS
 // =====================================================
-
 const int left_nslp_pin = 31;
 const int right_nslp_pin = 11;
-
 const int left_dir_pin = 29;
 const int right_dir_pin = 30;
-
 const int left_pwm_pin = 40;
 const int right_pwm_pin = 39;
-
 const int LED_RF = 41;
 
 // =====================================================
 // 3. PD CONTROLLER
 // =====================================================
-
-float KP = 0.25;
-float KD = 1.0;
+float KP = 0.06;
+float KD = 0.3;
 
 float error = 0;
 float prevError = 0;
 float derivative = 0;
 float correction = 0;
 
-int base_speed = 110;
+const int NORMAL_BASE_SPEED = 120;
+int base_speed = NORMAL_BASE_SPEED;
 
 // =====================================================
-// 4. MOTOR SPEED VARIABLES
+// 4. OUTER-SENSOR PIVOT CONFIGURATION
 // =====================================================
+// Assumption: S0 is rightmost and S7 is leftmost.
+const int OUTER_SENSOR_THRESHOLD = 1500;
 
+// Trigger Pivot only when the TWO outer sensors on the SAME side
+// are both above 2000 AND the absolute overall error is above 2000.
+// Right pair: S0 + S1. Left pair: S6 + S7.
+const int PIVOT_TRIGGER_ERROR_THRESHOLD = 2000;
+
+// Exit Pivot when the absolute overall error returns below 2000.
+const int PIVOT_ERROR_EXIT_THRESHOLD = 1500;
+
+// Pivot exit center-sensor threshold: either S3 OR S4 must exceed this value.
+const int CENTER_SENSOR_THRESHOLD = 1500;
+
+const int PIVOT_SPEED = 110; // Approximately half of maximum PWM
+const unsigned long PIVOT_CHECK_INTERVAL = 20;
+
+bool pivotActive = false;
+int pivotDirection = 0; // +1 = right, -1 = left
+unsigned long lastPivotCheckTime = 0;
+
+// =====================================================
+// 5. MOTOR SPEED VARIABLES
+// =====================================================
 int currentLeftSpeed = 0;
 int currentRightSpeed = 0;
 
 // =====================================================
-// 5. DATA LOGGER CONFIGURATION
+// 6. DATA LOGGER CONFIGURATION
 // =====================================================
-
-const unsigned long START_DELAY_TIME = 2000; // 2 seconds
-const unsigned long RUN_TIME = 3000;         // 3 seconds
-const unsigned long SAMPLE_INTERVAL = 10;    // 10 ms
-
+const unsigned long START_DELAY_TIME = 2000;
+const unsigned long RUN_TIME = 20000;
+const unsigned long SAMPLE_INTERVAL = 10;
 const int MAX_SAMPLES = 300;
 
 struct DataPoint
 {
-
     unsigned long time_ms;
-
     uint16_t sensor[8];
-
     float error;
     float derivative;
     float correction;
-
+    int base_speed;
     int left_speed;
     int right_speed;
+    int pivot_active;
+    int pivot_direction;
+    int center_detected;
 };
 
 DataPoint dataLog[MAX_SAMPLES];
-
 int sampleCount = 0;
 
 // =====================================================
-// 6. STATE MACHINE
+// 7. LOGGER STATE MACHINE
 // =====================================================
-
 enum LoggerState
 {
-
     READY,
     START_DELAY,
     RECORDING,
     DATA_READY,
     PRINTING
 };
-
 LoggerState state = READY;
 
 // =====================================================
-// 7. S1 BUTTON CONFIGURATION
-// MSP432P401R LaunchPad
-//
-// S1 = P1.1
-// Active LOW
-//
-// Direct GPIO register access avoids uncertainty
-// about Energia digital pin numbering.
+// 8. S1 BUTTON CONFIGURATION
 // =====================================================
-
 const unsigned long DEBOUNCE_TIME = 30;
-
 int lastButtonReading = HIGH;
 int stableButtonState = HIGH;
-
 unsigned long lastDebounceTime = 0;
 
 // =====================================================
-// 8. TIMING VARIABLES
+// 9. TIMING VARIABLES
 // =====================================================
-
 unsigned long delayStartTime = 0;
 unsigned long runStartTime = 0;
 unsigned long lastSampleTime = 0;
 
 // =====================================================
-// 9. MOTOR CONTROL FUNCTIONS
+// 10. MOTOR CONTROL FUNCTIONS
 // =====================================================
-
 void setMotor(int motor_speed, int dir_pin, int pwm_pin)
 {
-
     motor_speed = constrain(motor_speed, -255, 255);
 
     if (motor_speed == 0)
@@ -138,53 +133,28 @@ void setMotor(int motor_speed, int dir_pin, int pwm_pin)
         return;
     }
 
-    if (motor_speed > 0)
-    {
-        digitalWrite(dir_pin, LOW);
-    }
-    else
-    {
-        digitalWrite(dir_pin, HIGH);
-    }
-
+    digitalWrite(dir_pin, motor_speed > 0 ? LOW : HIGH);
     analogWrite(pwm_pin, abs(motor_speed));
 }
 
 void stopMotors()
 {
-
     setMotor(0, left_dir_pin, left_pwm_pin);
     setMotor(0, right_dir_pin, right_pwm_pin);
+    currentLeftSpeed = 0;
+    currentRightSpeed = 0;
 }
 
 // =====================================================
-// 10. BUTTON READ FUNCTION
-// S1 is P1.1
+// 11. BUTTON READ AND DEBOUNCE
 // =====================================================
-
 int readS1()
 {
-
-    // LOW = pressed
-    // HIGH = released
-    if (P1->IN & BIT1)
-    {
-        return HIGH;
-    }
-    else
-    {
-        return LOW;
-    }
+    return (P1->IN & BIT1) ? HIGH : LOW;
 }
-
-// =====================================================
-// 11. BUTTON DEBOUNCE
-// Returns TRUE once per button press
-// =====================================================
 
 bool buttonPressed()
 {
-
     int reading = readS1();
 
     if (reading != lastButtonReading)
@@ -194,10 +164,8 @@ bool buttonPressed()
 
     if (millis() - lastDebounceTime >= DEBOUNCE_TIME)
     {
-
         if (reading != stableButtonState)
         {
-
             stableButtonState = reading;
 
             if (stableButtonState == LOW)
@@ -209,32 +177,25 @@ bool buttonPressed()
     }
 
     lastButtonReading = reading;
-
     return false;
 }
 
 // =====================================================
-// 12. CALCULATE ERROR
-// Original sensor normalization and weighted error
+// 12. CALCULATE OVERALL ERROR
 // =====================================================
-
 float calculateError()
 {
-
     float newError = 0;
 
     for (int i = 0; i < sensor_count; i++)
     {
-
         long raw = sensorValues[i];
 
-        long normalized =
-            (raw - minValues[i]) * 1000L / (maxValues[i] - minValues[i]);
+        long normalized = (raw - minValues[i]) * 1000L / (maxValues[i] - minValues[i]);
 
         normalized = constrain(normalized, 0, 1000);
 
         int holdError = (normalized * weights[i]) / 8;
-
         newError += holdError;
     }
 
@@ -244,24 +205,95 @@ float calculateError()
 // =====================================================
 // 13. PD CALCULATION
 // =====================================================
-
 void calculatePD()
 {
-
     error = calculateError();
-
     derivative = error - prevError;
-
     correction = KP * error + KD * derivative;
 }
 
 // =====================================================
-// 14. MOTOR CONTROL USING PD OUTPUT
+// 14. PIVOT CONTROL
 // =====================================================
+void applyPivot()
+{
+    if (pivotDirection > 0)
+    {
+        // Pivot right: left wheel forward, right wheel backward.
+        setMotor(PIVOT_SPEED, left_dir_pin, left_pwm_pin);
+        setMotor(-PIVOT_SPEED, right_dir_pin, right_pwm_pin);
 
+        currentLeftSpeed = PIVOT_SPEED;
+        currentRightSpeed = -PIVOT_SPEED;
+    }
+    else
+    {
+        // Pivot left: left wheel backward, right wheel forward.
+        setMotor(-PIVOT_SPEED, left_dir_pin, left_pwm_pin);
+        setMotor(PIVOT_SPEED, right_dir_pin, right_pwm_pin);
+
+        currentLeftSpeed = -PIVOT_SPEED;
+        currentRightSpeed = PIVOT_SPEED;
+    }
+}
+
+void startPivot(int direction)
+{
+    pivotActive = true;
+    pivotDirection = direction;
+    lastPivotCheckTime = millis();
+
+    derivative = 0;
+    correction = 0;
+
+    applyPivot();
+}
+
+void updatePivot()
+{
+    unsigned long now = millis();
+
+    // Keep pivoting between the 20 ms sensor/error checks.
+    if (now - lastPivotCheckTime < PIVOT_CHECK_INTERVAL)
+    {
+        applyPivot();
+        return;
+    }
+
+    lastPivotCheckTime = now;
+
+    // sensorValues[] is refreshed by ECE3_read_IR() in loop().
+    error = calculateError();
+
+    // Exit Pivot only when BOTH conditions are satisfied:
+    // 1. The absolute overall error is below the exit threshold.
+    // 2. At least ONE center sensor (S3 OR S4) exceeds the threshold.
+    bool errorSmall = abs((int)error) < PIVOT_ERROR_EXIT_THRESHOLD;
+
+    bool centerDetected =
+        (sensorValues[3] > CENTER_SENSOR_THRESHOLD) ||
+        (sensorValues[4] > CENTER_SENSOR_THRESHOLD);
+
+    if (errorSmall && centerDetected)
+    {
+        pivotActive = false;
+        pivotDirection = 0;
+
+        // Avoid a derivative spike when handing control back to PD.
+        prevError = error;
+        derivative = 0;
+        correction = 0;
+        return;
+    }
+
+    applyPivot();
+}
+
+// =====================================================
+// 15. NORMAL PD MOTOR CONTROL
+// =====================================================
 void controlMotors()
 {
-
     int right_speed = base_speed - (int)correction;
     int left_speed = base_speed + (int)correction;
 
@@ -278,16 +310,12 @@ void controlMotors()
 }
 
 // =====================================================
-// 15. RECORD DATA
+// 16. RECORD DATA
 // =====================================================
-
 void recordData()
 {
-
     if (sampleCount >= MAX_SAMPLES)
-    {
         return;
-    }
 
     DataPoint &d = dataLog[sampleCount];
 
@@ -301,20 +329,26 @@ void recordData()
     d.error = error;
     d.derivative = derivative;
     d.correction = correction;
-
+    d.base_speed = base_speed;
     d.left_speed = currentLeftSpeed;
     d.right_speed = currentRightSpeed;
+    d.pivot_active = pivotActive ? 1 : 0;
+    d.pivot_direction = pivotDirection;
+
+    d.center_detected =
+        (sensorValues[3] > CENTER_SENSOR_THRESHOLD ||
+         sensorValues[4] > CENTER_SENSOR_THRESHOLD)
+            ? 1
+            : 0;
 
     sampleCount++;
 }
 
 // =====================================================
-// 16. START 2-SECOND DELAY
+// 17. START DELAY
 // =====================================================
-
 void startDelay()
 {
-
     sampleCount = 0;
 
     error = 0;
@@ -325,44 +359,39 @@ void startDelay()
     currentLeftSpeed = 0;
     currentRightSpeed = 0;
 
+    pivotActive = false;
+    pivotDirection = 0;
+    lastPivotCheckTime = 0;
+
+    base_speed = NORMAL_BASE_SPEED;
+
     stopMotors();
 
     delayStartTime = millis();
-
     state = START_DELAY;
 
     digitalWrite(LED_RF, HIGH);
 }
 
-// =====================================================
-// 17. START RECORDING AFTER 2-SECOND DELAY
-// =====================================================
-
 void beginRecording()
 {
-
     runStartTime = millis();
     lastSampleTime = runStartTime;
-
     state = RECORDING;
 }
 
 // =====================================================
-// 18. PRINT DATA AS CSV
+// 18. PRINT CSV DATA
 // =====================================================
-
 void printData()
 {
-
     Serial.println(
-        "time_ms,"
-        "S0,S1,S2,S3,S4,S5,S6,S7,"
-        "error,derivative,correction,"
-        "left_speed,right_speed");
+        "time_ms,S0,S1,S2,S3,S4,S5,S6,S7,"
+        "error,derivative,correction,base_speed,left_speed,right_speed,"
+        "pivot_active,pivot_direction,center_detected");
 
     for (int i = 0; i < sampleCount; i++)
     {
-
         DataPoint &d = dataLog[i];
 
         Serial.print(d.time_ms);
@@ -375,18 +404,22 @@ void printData()
 
         Serial.print(",");
         Serial.print(d.error, 2);
-
         Serial.print(",");
         Serial.print(d.derivative, 2);
-
         Serial.print(",");
         Serial.print(d.correction, 2);
-
+        Serial.print(",");
+        Serial.print(d.base_speed);
         Serial.print(",");
         Serial.print(d.left_speed);
-
         Serial.print(",");
-        Serial.println(d.right_speed);
+        Serial.print(d.right_speed);
+        Serial.print(",");
+        Serial.print(d.pivot_active);
+        Serial.print(",");
+        Serial.print(d.pivot_direction);
+        Serial.print(",");
+        Serial.println(d.center_detected);
     }
 
     Serial.println("END_OF_DATA");
@@ -395,43 +428,31 @@ void printData()
 // =====================================================
 // 19. SETUP
 // =====================================================
-
 void setup()
 {
-
-    // Motor pins
     pinMode(left_nslp_pin, OUTPUT);
     pinMode(right_nslp_pin, OUTPUT);
-
     pinMode(left_dir_pin, OUTPUT);
     pinMode(right_dir_pin, OUTPUT);
-
     pinMode(left_pwm_pin, OUTPUT);
     pinMode(right_pwm_pin, OUTPUT);
-
-    // LED
     pinMode(LED_RF, OUTPUT);
 
-    // Configure S1 = P1.1 as input with pull-up
-    P1->DIR &= ~BIT1; // Input
-    P1->REN |= BIT1;  // Enable resistor
-    P1->OUT |= BIT1;  // Pull-up
+    // Configure S1 button = P1.1
+    P1->DIR &= ~BIT1;
+    P1->REN |= BIT1;
+    P1->OUT |= BIT1;
 
-    // Enable motor drivers
     digitalWrite(left_nslp_pin, HIGH);
     digitalWrite(right_nslp_pin, HIGH);
 
     stopMotors();
 
-    // Initialize sensors
     ECE3_Init();
-
-    // Serial
     Serial.begin(115200);
 
     digitalWrite(LED_RF, LOW);
 
-    // Initialize button debounce
     lastButtonReading = readS1();
     stableButtonState = lastButtonReading;
 }
@@ -439,20 +460,12 @@ void setup()
 // =====================================================
 // 20. MAIN LOOP
 // =====================================================
-
 void loop()
 {
-
     bool pressed = buttonPressed();
-
-    // ---------------------------------------------------
-    // STATE 1: READY
-    // Press S1 -> Start 2-second delay
-    // ---------------------------------------------------
 
     if (state == READY)
     {
-
         stopMotors();
 
         if (pressed)
@@ -460,70 +473,96 @@ void loop()
             startDelay();
         }
     }
-
-    // ---------------------------------------------------
-    // STATE 2: START_DELAY
-    // Wait 2 seconds before car starts
-    // ---------------------------------------------------
-
     else if (state == START_DELAY)
     {
-
         stopMotors();
 
         if (millis() - delayStartTime >= START_DELAY_TIME)
         {
-
             beginRecording();
         }
     }
-
-    // ---------------------------------------------------
-    // STATE 3: RECORDING
-    // Car runs for 3 seconds
-    // ---------------------------------------------------
-
     else if (state == RECORDING)
     {
-
         ECE3_read_IR(sensorValues);
+        error = calculateError();
 
-        calculatePD();
+        if (pivotActive)
+        {
+            updatePivot();
 
-        controlMotors();
+            // Resume PD on the same loop that pivot exits.
+            if (!pivotActive)
+            {
+                calculatePD();
+                controlMotors();
+            }
+            else
+            {
+                derivative = 0;
+                correction = 0;
+            }
+        }
+        else
+        {
+            // Right side pair: S0 and S1 must BOTH exceed 2000.
+            // Left side pair:  S6 and S7 must BOTH exceed 2000.
+            // In addition, absolute overall error must exceed 2000.
+            bool errorLarge =
+                abs((int)error) > PIVOT_TRIGGER_ERROR_THRESHOLD;
 
-        // Sample every 10 ms
+            bool rightOuterPairTriggered =
+                (sensorValues[0] > OUTER_SENSOR_THRESHOLD) &&
+                (sensorValues[1] > OUTER_SENSOR_THRESHOLD) &&
+                errorLarge;
+
+            bool leftOuterPairTriggered =
+                (sensorValues[6] > OUTER_SENSOR_THRESHOLD) &&
+                (sensorValues[7] > OUTER_SENSOR_THRESHOLD) &&
+                errorLarge;
+
+            if (rightOuterPairTriggered || leftOuterPairTriggered)
+            {
+                int direction;
+
+                if (rightOuterPairTriggered && leftOuterPairTriggered)
+                {
+                    // If both pairs trigger, use the sign of error to choose direction.
+                    direction = (error >= 0) ? 1 : -1;
+                }
+                else
+                {
+                    direction = rightOuterPairTriggered ? 1 : -1;
+                }
+
+                startPivot(direction);
+            }
+            else
+            {
+                calculatePD();
+                controlMotors();
+            }
+        }
+
         if (millis() - lastSampleTime >= SAMPLE_INTERVAL)
         {
-
             recordData();
-
             lastSampleTime = millis();
         }
 
-        // Stop after 3 seconds
         if (millis() - runStartTime >= RUN_TIME)
         {
-
             stopMotors();
 
-            currentLeftSpeed = 0;
-            currentRightSpeed = 0;
+            pivotActive = false;
+            pivotDirection = 0;
 
             digitalWrite(LED_RF, LOW);
-
             state = DATA_READY;
         }
     }
-
-    // ---------------------------------------------------
-    // STATE 4: DATA_READY
-    // Press S1 -> Export data
-    // ---------------------------------------------------
-
     else if (state == DATA_READY)
     {
-
         stopMotors();
 
         if (pressed)
@@ -531,17 +570,10 @@ void loop()
             state = PRINTING;
         }
     }
-
-    // ---------------------------------------------------
-    // STATE 5: PRINTING
-    // ---------------------------------------------------
-
     else if (state == PRINTING)
     {
-
         stopMotors();
 
-        // Only export when USB Serial is connected
         if (Serial)
         {
             printData();
